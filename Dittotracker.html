@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Ditto Tracker with Map & Timers (Dark Mode + Add Buttons + Numbered Pins)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    padding: 40px;
+    background: #121212;
+    color: #eee;
+  }
+  .container {
+    background: #1e1e1e;
+    padding: 25px;
+    border-radius: 10px;
+    max-width: 900px;
+    box-shadow: 0 0 15px rgba(255,255,255,0.1);
+  }
+  .row {
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+  }
+  input.coord {
+    padding: 8px;
+    width: 230px;
+    margin-right: 6px;
+    border-radius: 4px;
+    border: 1px solid #555;
+    font-size: 14px;
+    color: #eee;
+    background: #2a2a2a;
+  }
+  input.time {
+    width: 60px;
+    padding: 6px;
+    border-radius: 4px;
+    border: 1px solid #555;
+    font-size: 14px;
+    margin-right: 6px;
+    color: #eee;
+    background: #2a2a2a;
+  }
+  button {
+    padding: 6px 12px;
+    cursor: pointer;
+    background: #444;
+    border: none;
+    border-radius: 4px;
+    color: #eee;
+    transition: background-color 0.3s;
+    margin-right: 6px;
+  }
+  button:hover {
+    background: #666;
+  }
+  #lastCatch {
+    margin-top: 15px;
+    font-weight: bold;
+  }
+  hr {
+    margin: 15px 0;
+    border-color: #444;
+  }
+  #map {
+    height: 400px;
+    margin-top: 20px;
+    border: 1px solid #444;
+    border-radius: 10px;
+    position: relative;
+    filter: brightness(1);
+  }
+  .color0 { background: #5c1f1f; border-color: #cc6666; color: #fdd; }
+  .color1 { background: #1f5c1f; border-color: #66cc66; color: #dfd; }
+  .color2 { background: #1f1f5c; border-color: #6666cc; color: #ddf; }
+  .color3 { background: #5c471f; border-color: #cc9966; color: #fce8c1; }
+  .color4 { background: #4a1f5c; border-color: #9966cc; color: #e4d3ff; }
+  .color5 { background: #5c5c1f; border-color: #cccc66; color: #f9f9aa; }
+  .timer-label {
+    background: #000000dd; /* nearly opaque black */
+    color: white;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid white;
+    white-space: normal;
+    pointer-events: none;
+    text-align: left;
+    min-width: 70px;
+    font-family: "Consolas", "Courier New", monospace;
+    line-height: 1.4;
+  }
+  /* Smaller black text for cooldown and despawn lines */
+  .timer-label .cd, .timer-label .despawn {
+    color: black;
+    font-size: 11px;
+    font-weight: normal;
+  }
+  /* The number label remains white and bold */
+  .timer-label .number {
+    font-size: 16px;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 4px;
+  }
+  .ready {
+    color: #4CAF50;
+    font-weight: bold;
+  }
+  .late {
+    color: #E53935;
+    font-weight: bold;
+  }
+  .result {
+    min-width: 300px;
+  }
+  /* Number label for input rows */
+  .number-label {
+    min-width: 20px;
+    margin-right: 8px;
+    font-weight: bold;
+    font-size: 18px;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <h2>Ditto Tracker with Map & Timers (Dark Mode + Add Buttons + Numbered Pins)</h2>
+
+  <div class="row">
+    <input id="catchCoord" class="coord" placeholder="Last Catch Coordinate (lat,lon)" />
+    <button onclick="setCatch()">Catch</button>
+  </div>
+
+  <div id="lastCatch">No catch recorded</div>
+
+  <hr>
+
+  <h3>Analyze Coordinates</h3>
+  <p>Enter coordinate + despawn minutes, then click Add</p>
+
+  <div id="analyzeContainer"></div>
+
+  <!-- Map -->
+  <div id="map"></div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+let lastCatch = null;
+let lastCatchTime = null;
+
+let map = L.map('map').setView([0,0], 2);
+let markers = [];
+
+const colors = [
+  '#cc6666',
+  '#66cc66',
+  '#6666cc',
+  '#cc9966',
+  '#9966cc',
+  '#cccc66'
+];
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+}).addTo(map);
+
+function parseCoord(text){
+  let p = text.split(",");
+  if(p.length !== 2) return null;
+  let lat = parseFloat(p[0]);
+  let lon = parseFloat(p[1]);
+  if(isNaN(lat) || isNaN(lon)) return null;
+  return {lat, lon};
+}
+
+function format(ms){
+  if(ms <= 0) return "0s";
+  let s = Math.floor(ms/1000);
+  let m = Math.floor(s/60);
+  s = s % 60;
+  return m + "m " + s + "s";
+}
+
+function haversine(lat1,lon1,lat2,lon2){
+  const R = 6371;
+  let dLat = (lat2 - lat1) * Math.PI / 180;
+  let dLon = (lon2 - lon1) * Math.PI / 180;
+  let a = Math.sin(dLat/2)**2 +
+          Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+          Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function cooldownMinutes(km){
+  if(km<=1) return 1;
+  if(km<=3) return 2;
+  if(km<=7) return 5;
+  if(km<=10) return 7;
+  if(km<=12) return 8;
+  if(km<=18) return 10;
+  if(km<=30) return 15;
+  if(km<=65) return 22;
+  if(km<=81) return 25;
+  if(km<=250) return 45;
+  if(km<=500) return 60;
+  if(km<=700) return 75;
+  if(km<=1000) return 90;
+  return 120;
+}
+
+let addedCoords = [];
+
+function setCatch(){
+  let text = document.getElementById("catchCoord").value;
+  let coord = parseCoord(text);
+  if(!coord){
+    alert("Invalid coordinate format");
+    return;
+  }
+  lastCatch = coord;
+  lastCatchTime = Date.now();
+  document.getElementById("lastCatch").innerHTML = 
+    "Last Catch: " + text + " | " + new Date().toLocaleTimeString();
+  updateAll();
+}
+
+function createRow(index) {
+  let div = document.createElement("div");
+  div.className = "row";
+
+  let numLabel = document.createElement("div");
+  numLabel.textContent = (index + 1);
+  numLabel.className = "number-label";
+  numLabel.style.color = colors[index % colors.length];
+  div.appendChild(numLabel);
+
+  let inputCoord = document.createElement("input");
+  inputCoord.type = "text";
+  inputCoord.placeholder = "Coordinate";
+  inputCoord.className = `coord coordInput color${index}`;
+  inputCoord.id = `coordInput${index}`;
+
+  let inputDespawn = document.createElement("input");
+  inputDespawn.type = "number";
+  inputDespawn.min = "0";
+  inputDespawn.placeholder = "min";
+  inputDespawn.className = `time despawnInput color${index}`;
+  inputDespawn.id = `despawnInput${index}`;
+
+  let btn = document.createElement("button");
+  btn.textContent = "Add";
+  btn.id = `btn${index}`;
+
+  let resultSpan = document.createElement("span");
+  resultSpan.className = "result";
+  resultSpan.id = `result${index}`;
+
+  btn.onclick = function() {
+    if(btn.textContent === "Add"){
+      let coordVal = inputCoord.value.trim();
+      let despawnVal = inputDespawn.value.trim();
+      let coord = parseCoord(coordVal);
+      let despawn = parseInt(despawnVal);
+
+      if(!coord){
+        alert("Invalid coordinate format");
+        return;
+      }
+      if(isNaN(despawn) || despawn < 0){
+        alert("Invalid despawn time");
+        return;
+      }
+      if(!lastCatch){
+        alert("Set last catch first.");
+        return;
+      }
+
+      addedCoords[index] = {
+        coord,
+        despawnMinutes: despawn,
+        addedTime: Date.now(),
+        cooldown: cooldownMinutes(haversine(lastCatch.lat, lastCatch.lon, coord.lat, coord.lon))
+      };
+
+      inputCoord.disabled = true;
+      inputDespawn.disabled = true;
+      btn.textContent = "Edit";
+
+      updateResult(index);
+      updateAll();
+    } else {
+      inputCoord.disabled = false;
+      inputDespawn.disabled = false;
+      btn.textContent = "Add";
+      document.getElementById(`result${index}`).textContent = "";
+      addedCoords[index] = null;
+      updateAll();
+    }
+  };
+
+  div.appendChild(inputCoord);
+  div.appendChild(inputDespawn);
+  div.appendChild(btn);
+  div.appendChild(resultSpan);
+
+  return div;
+}
+
+function updateResult(index){
+  let info = addedCoords[index];
+  if(!info) return;
+
+  let now = Date.now();
+  let elapsed = now - info.addedTime;
+  let cdMillis = info.cooldown * 60000;
+  let despawnMillis = info.despawnMinutes * 60000;
+
+  let cdLeft = cdMillis - elapsed;
+  let despawnLeft = despawnMillis - elapsed;
+
+  let status = cdLeft <= 0 ? "<span class='ready'>READY</span>" : "Wait";
+
+  if(despawnLeft <= 0){
+    clearRow(index);
+    return;
+  }
+
+  document.getElementById(`result${index}`).innerHTML = 
+    `${haversine(lastCatch.lat, lastCatch.lon, info.coord.lat, info.coord.lon).toFixed(2)} km | CD ${format(cdLeft)} | Despawn ${format(despawnLeft)} | ${status}`;
+}
+
+function clearRow(index){
+  addedCoords[index] = null;
+  let inputCoord = document.getElementById(`coordInput${index}`);
+  let inputDespawn = document.getElementById(`despawnInput${index}`);
+  let btn = document.getElementById(`btn${index}`);
+  let result = document.getElementById(`result${index}`);
+
+  inputCoord.disabled = false;
+  inputDespawn.disabled = false;
+  inputCoord.value = "";
+  inputDespawn.value = "";
+  btn.textContent = "Add";
+  result.textContent = "";
+  updateAll();
+}
+
+function clearMarkers(){
+  markers.forEach(({marker, label}) => {
+    map.removeLayer(marker);
+    if(label) map.removeLayer(label);
+  });
+  markers = [];
+}
+
+function createTimerLabel(latlng, text){
+  return L.marker(latlng, {
+    icon: L.divIcon({
+      className: 'timer-label',
+      html: text,
+      iconAnchor: [-15, 15],
+      interactive: false
+    }),
+    keyboard: false,
+    interactive: false
+  }).addTo(map);
+}
+
+function updateMap(){
+  clearMarkers();
+
+  if(lastCatch){
+    let lcMarker = L.marker([lastCatch.lat, lastCatch.lon], {
+      title: "Last Catch",
+      icon: L.icon({
+        iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png',
+        iconSize: [32, 32]
+      })
+    }).addTo(map);
+    lcMarker.bindPopup("Last Catch");
+    markers.push({marker: lcMarker, label: null});
+  }
+
+  addedCoords.forEach((info, i) => {
+    if(!info) return;
+
+    let color = colors[i % colors.length];
+    let markerIcon = L.icon({
+      iconUrl: `https://chart.googleapis.com/chart?chst=d_map_pin_letter&chld=${i+1}|${color.slice(1)}`,
+      iconSize: [21, 34],
+      iconAnchor: [10, 34],
+      popupAnchor: [0, -28],
+    });
+
+    let marker = L.marker([info.coord.lat, info.coord.lon], {title: `Target ${i+1}`, icon: markerIcon}).addTo(map);
+
+    let now = Date.now();
+    let elapsed = now - info.addedTime;
+    let cdLeft = info.cooldown * 60000 - elapsed;
+    let despawnLeft = info.despawnMinutes * 60000 - elapsed;
+
+    let timerText = `
+      <div class="number">#${i + 1}</div>
+      <div class="cd">CD: ${format(cdLeft)}</div>
+      <div class="despawn">Despawn: ${format(despawnLeft)}</div>
+    `;
+
+    let label = createTimerLabel([info.coord.lat, info.coord.lon], timerText);
+
+    markers.push({marker, label});
+
+    if(despawnLeft <= 0){
+      clearRow(i);
+    }
+  });
+
+  if(markers.length > 0){
+    let group = L.featureGroup(markers.map(m => m.marker));
+    map.fitBounds(group.getBounds().pad(0.5));
+  }
+}
+
+function updateAll(){
+  addedCoords.forEach((_, i) => updateResult(i));
+  updateMap();
+}
+
+const analyzeContainer = document.getElementById("analyzeContainer");
+for(let i=0; i<6; i++){
+  analyzeContainer.appendChild(createRow(i));
+}
+
+setInterval(() => {
+  updateAll();
+}, 1000);
+</script>
+
+</body>
+</html>
